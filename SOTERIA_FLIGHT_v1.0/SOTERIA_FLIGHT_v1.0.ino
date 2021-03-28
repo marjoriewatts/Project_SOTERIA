@@ -27,9 +27,11 @@ File GPS1;
 File Alt;
 File Pos;
 
+//defining elements for state transitions
 int randomState = 0;
 #define N 3
 int currentTime;
+float currentAlt;
 
 
 //camera setup definitions 
@@ -42,18 +44,17 @@ File myFile;
 byte addresses[][6] = {"1Node", "2Node"};
 bool role = 0;
 
+//sample rate delay for IMU data
 #define BNO055_SAMPLERATE_DELAY_MS (100)
-
-float currentAlt;
 
 
 //define the pin numbers of the button and LEDs
-const int buttonPin = 2;     // the number of the pushbutton pin 
+const int buttonPin = 2;      // the number of the pushbutton pin 
 const int led1Pin =  27;      // the number of the safe state LED pin
 const int led2Pin =  29;      // the number of the launch state LED pin
 const int led3Pin =  31;      // the number of the acsending LED pin
 
-//initial position of servo and button (degrees)
+//initial position of servo (degrees) and button
 int pos = 0;
 int buttonState = 0;
 
@@ -70,7 +71,7 @@ RF24 radio(36, 10);  // CE, CSN
 Adafruit_GPS GPS(&GPSSerial);
 uint32_t timer = millis();
 
-//integration for the IMU data
+//functions for IMU integration calculation to find velocity and position
 double xPos = 0, yPos = 0, zPos = 0;  /*velocity = accel*dt (dt in seconds), position = 0.5*accel*dt^2*/
 double ACCEL_VEL_TRANSITION =  (double)(BNO055_SAMPLERATE_DELAY_MS) / 1000.0;
 double ACCEL_POS_TRANSITION = 0.5 * ACCEL_VEL_TRANSITION * ACCEL_VEL_TRANSITION;
@@ -94,7 +95,7 @@ struct Data {
 //-----------------------------------------------------------------------------------------------------------
 //function to take, save and send photos
 void takePhoto() {
-  
+  //initialise camera and test camera connection
   if (cam.begin()) {
     Serial.println("Camera Found:");
   } else {
@@ -120,6 +121,7 @@ void takePhoto() {
 
   delay(10);
 
+  //take picture and report result
   if (! cam.takePicture())
     Serial.println("Failed to snap!");
   else
@@ -141,7 +143,6 @@ void takePhoto() {
   File imgFile = SD.open(filename, FILE_WRITE);
 
   // Get the size of the image (frame) taken  
-  
   uint16_t jpglen = cam.frameLength();
   Serial.print("Storing ");
   Serial.print(jpglen, DEC);
@@ -166,12 +167,12 @@ void takePhoto() {
   imgFile.close();
   Serial.println(strcat("Written to ", filename));
 
-
+  //time taken for picture to be taken
   time = millis() - time;
   Serial.println("done!");
   Serial.print(time); Serial.println(" ms elapsed");
 
-//radio setup for pictures
+  //radio setup for pictures
   pinMode(53, OUTPUT);
   digitalWrite(53, LOW);
   if (!SD.begin(BUILTIN_SDCARD))
@@ -187,6 +188,7 @@ void takePhoto() {
   radio.openWritingPipe(addresses[0]);
   radio.openReadingPipe(1, addresses[1]);
 
+  //fill array to notify the reciever a picture is about to be transmitted
   Sensor.null1 = 9;
   Sensor.a = 9;
   Sensor.b = 9;
@@ -196,6 +198,7 @@ void takePhoto() {
   Sensor.f = 9;
   Sensor.g = 9;
 
+  //send notification array
   radio.write(&Sensor, sizeof(Sensor));
   bool nice = radio.write(&Sensor, sizeof(Sensor));
   if (nice) {
@@ -204,12 +207,14 @@ void takePhoto() {
   else {
     Serial.println("Not ready for camera oops");
   }
-  
+
+  //send photo (from sendfile function defined below)
   sendfile(filename);
 
 }
-//define function that reads the file the pic is in
+//define function that reads the file the picture is in
 void readfile() {
+  //fills buffer with 32 bytes of image and sends, repeating until less than 32 bits left
   int i = 0;
   while (myFile.available())
   {
@@ -224,6 +229,7 @@ void readfile() {
       i = 0;
     }
   }
+  //sends final packet (less than 32 bytes)
   if (i > 0) {
     radio.flush_tx();
     radio.write(buf, i);
@@ -233,10 +239,9 @@ void readfile() {
     // Serial.println(F(buf));
     Serial.println("");
     Serial.println("Last stream of less than 32 bytes");
-    digitalWrite(53, LOW);
   }
 }
-//define function that sends the pic over radio
+//define function that sends the picture over radio
 void sendfile(char *filename) {
   Serial.println(strcat("SD -> ", filename));
   myFile = SD.open(filename);
@@ -250,12 +255,27 @@ void sendfile(char *filename) {
   {
     Serial.println("error opening file"); 
   }
+
+  //power the radio back on to continue sending telemetry
+  radio.begin();
+  //start radio
+  //radio.setPALevel(RF24_PA_MIN);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setPayloadSize(32);
+  //radio.enableDynamicPayloads();
+  radio.setChannel(124);
+  radio.setDataRate(RF24_250KBPS);
+  radio.openWritingPipe(address);
+  radio.openReadingPipe(0, address);
+  radio.stopListening();
+  radio.setRetries(2, 100);
+  radio.setAutoAck(1);
 }
 
 //-----------------------------------------------------------------------------------------------------------
-
-
 //create the states for the code to run through throughout the flight
+
+//state 0 is safe state where we can test different functions of the rocket before launch
 State* S0 = machine.addState([](){
   Serial.println("Safe State");
   //LED1 on
@@ -272,12 +292,7 @@ State* S0 = machine.addState([](){
     return;
   }
   }
-  });;
-
-State* S1 = machine.addState([](){
-  Serial.println("Launch");
-  //zero everything (?)
-  //servo test
+    //servo test
   for (pos = 0; pos <= 180; pos += 1) { // goes from 0 degrees to 180 degrees
     // in steps of 1 degree
     myservo.write(pos);              // tell servo to go to position in variable 'pos'
@@ -287,35 +302,37 @@ State* S1 = machine.addState([](){
     myservo.write(pos);              // tell servo to go to position in variable 'pos'
     delay(15);                       // waits 15ms for the servo to reach the position
   }
-  
-  //camera test
-  //takePhoto();
+  });;
 
+
+//state 1 is launch where an LED is turned on to signify readiness
+State* S1 = machine.addState([](){
+  Serial.println("Launch");
   digitalWrite(led2Pin, HIGH); //LED2 on
-  }
-);;
+});;
 
 
+//state 2 is ascension detection where the transition to this state starts the timer that will be used to force the transition between states if the other detection methods fail
 State* S2 = machine.addState([](){
   Serial.println("Ascending");
-  //tells if ascent is detected(!!!!!!!!!!!)
   //LED2 on
   digitalWrite(led3Pin, HIGH);
 });;
 
 
+//state 3 is apogee detection to track the flight and notify the ground that the system is still running through the states
 State* S3 = machine.addState([](){
   Serial.println("Apogee");
-  //tells if apogee is detected
 });;
 
 
+//state 4 is parachute deploy detection which, like apogee detect, lets ground know the code has moved into the next state and the rocket is now ready to open and start taking photos
 State* S4 = machine.addState([](){
   Serial.println("Parachute deploy");
-  //parachute detect confirmation
 });;
 
 
+//state 5 is camera where the rocket will take the photos to save and send back to ground for analysis (spotting fires)
 State* S5 = machine.addState([](){
   Serial.print("Camera");
   //servo open
@@ -325,12 +342,12 @@ State* S5 = machine.addState([](){
     delay(15);                       // waits 15ms for the servo to reach the position
   }
   
-  //take photos
+  //take, save and send photos
   takePhoto();
-  //save pictures onto on board sd card
 });;
 
 
+//state 6 is landing state where the nosecone closes again to protect the camera 
 State* S6 = machine.addState([](){
   Serial.println("Landing mode");
   //close servo
@@ -377,6 +394,7 @@ void Dispaly1(float B[3][1]){
 //-----------------------------------------------------------------------------------------------------------
 //-----------------------------------------------------------------------------------------------------------
 void setup() {
+  //initialise all components
   Serial.begin(115200);
   randomSeed(A0);
   myIMU.begin();
@@ -389,9 +407,8 @@ void setup() {
     ;
   }
   
-  currentTime = millis();
 
-  //attaches the servo on pin 9 to the servo object
+  //attaches the servo on pin 25 to the servo object
   myservo.attach(25);
   
   //start GPS
@@ -401,8 +418,7 @@ void setup() {
 
   delay(1000); //to give the system time to start up
   
-  //start radio
-  //radio.setPALevel(RF24_PA_MIN);
+  //start radio for the telemetry data (not camera)
   radio.setPALevel(RF24_PA_MAX);
   radio.setPayloadSize(32);
   //radio.enableDynamicPayloads();
@@ -412,7 +428,7 @@ void setup() {
   radio.openReadingPipe(0, address);
   radio.stopListening();
   radio.setRetries(2, 100);
-  radio.setAutoAck(1);                     // Ensure autoACK is enabled
+  radio.setAutoAck(1);  // Ensure autoACK is enabled
 
 
   //start altimeter
@@ -428,7 +444,6 @@ void setup() {
   cam.setImageSize(VC0706_160x120);          // small
   
 
-
   //initialise the LED pins as outputs:
   pinMode(led1Pin, OUTPUT);
   pinMode(led2Pin, OUTPUT);
@@ -441,10 +456,9 @@ void setup() {
 //-----------------------------------------------------------------------------------------------------------  
 //define transitions
   S0->addTransition([](){ //safe to launch
-    unsigned long t0 = millis();
     buttonState = digitalRead(buttonPin);
-    if(buttonState == LOW){
-      Serial.print("Transitioning to 1 ");
+    if(buttonState == LOW){       //button will be used to transition into Launch state
+      Serial.print("Transitioning to state 1 ");
       digitalWrite(led1Pin, LOW);
       S0->setTransition(0, 1);
     } 
@@ -458,20 +472,23 @@ void setup() {
   
 
   S1->addTransition([](){ //launch to ascending
-    unsigned long t1 = millis();
     imu::Vector<3> acc =myIMU.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
     double magnitude = sqrt((acc.x() * acc.x()) + (acc.y() * acc.y()) + (acc.z() * acc.z()));
-    if(magnitude > (20)){
-      Serial.print("Transitioning to 2 ");
-      digitalWrite(led2Pin, LOW);
+    if(magnitude > (20)){       //if the madnitude of acceleration increases above 20 then the rocket has launched and is now ascending
+      Serial.print("Transitioning to state 2 ");
+      digitalWrite(led2Pin, LOW); //turn off safe state LED
       const char ascDetect[] = "Ascent Detected!";
-      radio.write(&ascDetect, sizeof(ascDetect));
+      radio.write(&ascDetect, sizeof(ascDetect)); //send message to ground that ascent has been detected
+      currentTime = millis();  //start the flight timer (for forced transition between states)
       S1->setTransition(1, 2);
     } 
+    /* <for manually running through the states in testing>
     else if(buttonState == LOW){
       Serial.print("Transitioning to 2 ");
+      currentTime = millis();  //start the flight timer (for forced transition between states)
       S0->setTransition(1, 2);
     } 
+    */
     else {
       Serial.println("Condition not met, remaining in state 1");
       S1->setTransition(1,1);
@@ -485,23 +502,25 @@ void setup() {
     unsigned long t2 = millis();
     currentAlt = (bmp.readAltitude(1023.7)); /* Local pressure */
     delay(550);
-    if(currentAlt < (bmp.readAltitude(1023.7))){
+    if(currentAlt < (bmp.readAltitude(1023.7))){        //change state if altitude stops increasing over time (i.e. highest point has been reached)
       Serial.print("Transitioning to 3 ");
       const char apoDetect[] = "Apogee Detected!";
-      radio.write(&apoDetect, sizeof(apoDetect));
+      radio.write(&apoDetect, sizeof(apoDetect)); //send message to ground that apogee has been detected
       S2->setTransition(2, 3);
     } 
-    else if (t2 - currentTime > (13500)) {
+    else if (t2 - currentTime > (13500)) {        //forced transition between states after 13.5 seconds has passed (apogee should be reached at 13 seconds)
       digitalWrite(led3Pin, LOW);
       Serial.print("Transitioning to 3 ");
       const char apoDetect[] = "Apogee Detected!";
-      radio.write(&apoDetect, sizeof(apoDetect));
+      radio.write(&apoDetect, sizeof(apoDetect)); //send message to ground that apogee has been detected
       S2->setTransition(2, 3);
     }
+    /* <for manually running through the states in testing>
     else if(buttonState == LOW){
       Serial.print("Transitioning to 3 ");
       S0->setTransition(2, 3);
     } 
+    */
     else {
       Serial.println("Condition not met, remaining in state 2");
       S2->setTransition(2,2);
@@ -515,18 +534,20 @@ void setup() {
     unsigned long t3 = millis();
     imu::Vector<3> acc =myIMU.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
     double magnitude = sqrt((acc.x() * acc.x()) + (acc.y() * acc.y()) + (acc.z() * acc.z()));
-    if(1 < magnitude < 4){
+    if(1 < magnitude < 4){        //change state if magnitude of acceleration drops almost to zero (i.e. terminal velocity has been reached due to parachute deploy)
       Serial.print("Transitioning to 4 ");
       S3->setTransition(3, 4);
     } 
-    else if(t3 - currentTime > (18000)) {
+    else if(t3 - currentTime > (18000)) {       //forced transition between states after 18 seconds has passed (parachute deploy should occur at 14 seconds)
       Serial.print("Transitioning to 4 ");
       S3->setTransition(3, 4);
     }
+    /* <for manually running through the states in testing>
     else if(buttonState == LOW){
       Serial.print("Transitioning to 4 ");
       S0->setTransition(3, 4);
     }
+    */
     else {
       Serial.println("Condition not met, remaining in state 3");
       S3->setTransition(3,3);
@@ -538,19 +559,19 @@ void setup() {
 
   S4->addTransition([](){ //parachute deploy to camera
     unsigned long t4 = millis();
+    imu::Vector<3> acc =myIMU.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+    double magnitude = sqrt((acc.x() * acc.x()) + (acc.y() * acc.y()) + (acc.z() * acc.z()));
     currentAlt = (bmp.readAltitude(1023.7)); /* Local pressure */
-    if(currentAlt < 900){
+    if(currentAlt < 900 and 1 < magnitude < 4){       //change state when rocket is below a certain height and the parachute has definitely deployed so the nosecone doesn't open when falling under gravity
       Serial.print("Transitioning to 5 ");
       S4->setTransition(4, 5);
     } 
-    else if(t4 - currentTime > (35000)) {
-      Serial.print("Transitioning to 5 ");
-      S4->setTransition(4, 5);
-    }
+    /* <for manually running through the states in testing>
     else if(buttonState == LOW){
       Serial.print("Transitioning to 5 ");
       S0->setTransition(4, 5);
     }
+    */ 
     else {
       Serial.println("Condition not met, remaining in state 4");
       S4->setTransition(4,4);
@@ -562,18 +583,20 @@ void setup() {
   S5->addTransition([](){ //camera to landing
     unsigned long t5 = millis();
     currentAlt = (bmp.readAltitude(1023.7)); /* Local pressure */
-    if(currentAlt < 30){
+    if(currentAlt < 30){        //close the nosecone when 30m above the ground
       Serial.print("Transitioning to 6 ");
       S5->setTransition(5, 6);
     } 
-    else if(t5 - currentTime > (120000)) {
+    else if(t5 - currentTime > (120000)) {        //forced transition between states after 18 seconds has passed (parachute deploy should occur at 14 seconds)
       Serial.print("Transitioning to 6 ");
-      S5->setTransition(5, 6);
+      S5->setTransition(5, 6); 
     }
+    /* <for manually running through the states in testing>
     else if(buttonState == LOW){
       Serial.print("Transitioning to 6 ");
       S0->setTransition(5, 6);
     }
+    */
     else {
       Serial.println("Condition not met, remaining in state 5");
       S5->setTransition(5,5);
@@ -594,12 +617,10 @@ void loop() {
   uint8_t system, gyro, accel, mg =0;
   myIMU.getCalibration(&system, &gyro, &accel, &mg);
 
-  //get position data from IMU
+  //get orientation and acceleration data from IMU
   sensors_event_t orientationData , linearAccelData;
   myIMU.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
   myIMU.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);
-
-  //getting the data from the imu and giving them variable names
   imu::Vector<3> acc =myIMU.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
   imu::Vector<3> gyr =myIMU.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
   imu::Vector<3> mag =myIMU.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
@@ -607,6 +628,7 @@ void loop() {
   sensors_event_t event;
   myIMU.getEvent(&event);
 
+  //integrating IMU acceleration data twice to get position
   xPos = xPos + ACCEL_POS_TRANSITION * linearAccelData.acceleration.x;
   yPos = yPos + ACCEL_POS_TRANSITION * linearAccelData.acceleration.y;
   zPos = zPos + ACCEL_POS_TRANSITION * linearAccelData.acceleration.z;
@@ -617,21 +639,25 @@ void loop() {
       return;
   }
 //-----------------------------------------------------------------------------------------------------------  
-//matrices for position
+//define matrices for position
+//change in position in the frame of reference of the rocket matrix
 float B[3][1] = {
     {ACCEL_POS_TRANSITION * linearAccelData.acceleration.x},
     {ACCEL_POS_TRANSITION * linearAccelData.acceleration.y},
     {ACCEL_POS_TRANSITION * linearAccelData.acceleration.z},
 };
 
+//create an empty matrix to be filled with the global FOR data
   float z[3][1] = {
     {0},{0},{0},
 };
 
+//convert IMU yaw pitch and roll from degrees to radians
 float pitch = (event.orientation.y)*DEG_2_RAD;
 float roll = (event.orientation.z)*DEG_2_RAD; 
 float yaw =  (event.orientation.x)*DEG_2_RAD;
 
+//defining each element of the rotation matrix in terms of trig functions of angles
 float a11 = cos(pitch)*cos(yaw);
 float a12 = cos(pitch)*sin(yaw);
 float a13 = -sin(pitch);
@@ -642,24 +668,27 @@ float a31 = cos(roll)*sin(pitch)*cos(yaw)+sin(roll)*sin(yaw);
 float a32 = cos(roll)*sin(pitch)*sin(yaw)-sin(roll)*cos(yaw);
 float a33 = cos(pitch)*cos(roll);
 
-
+//create the rotation matrix
   float A[3][3] ={
   {a11, a12, a13},
   {a21, a22, a23},
   {a31, a32, a33},
 };
 
+//multiply the rotation matrix and the rocket FOR matrix to fill the global FOR matrix
 multiply(A,B,z);
 
+//define the new position of the rocket (global FOR) 
 xPos = xPos + z[1][1];
 yPos = yPos + z[2][1];
 zPos = zPos + z[3][1];
 
 
 //-----------------------------------------------------------------------------------------------------------  
-
 //file writing
-    //yaw pitch and roll 
+
+  //yaw pitch and roll 
+  /* <serial print for troubleshooting>
   Serial.print("Yaw angle: ");
   Serial.print(event.orientation.x, 4);
   Serial.print("\tPitch angle: ");
@@ -667,7 +696,9 @@ zPos = zPos + z[3][1];
   Serial.print("\tRoll angle: ");
   Serial.print(event.orientation.z, 4);
   Serial.println("");
+  */
 
+  //initialise the SD card
   Serial.print("Initializing SD card...");
 
   if (!SD.begin(BUILTIN_SDCARD)) {
@@ -676,15 +707,14 @@ zPos = zPos + z[3][1];
   }
   Serial.println("initialization done.");
 
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
+  // open the yaw pitch and roll file
   YPR = SD.open("YPR.txt", FILE_WRITE);
 
   // if the file opened okay, write to it:
   if (YPR) {
     Serial.print("Writing to YPR.txt...");
     
-    //yaw pitch and roll 
+    //write to file
     YPR.print("Yaw angle: ");
     YPR.print(event.orientation.x, 4);
     YPR.print("\tPitch angle: ");
@@ -695,7 +725,7 @@ zPos = zPos + z[3][1];
 
     delay(10);
 
-    // close the file:
+    // close the file
     YPR.close();
     Serial.println("done.");
   } else {
@@ -705,13 +735,16 @@ zPos = zPos + z[3][1];
 
 //-----------------------------------------------------------------------------------------------------------  
   //position
+  /* <serial print for troubleshooting>
   Serial.print("Xpos: ");
   Serial.print(xPos);
   Serial.print("\tYpos: ");
   Serial.print(yPos);
   Serial.print("\tZpos: ");
   Serial.println(zPos);
+  */
 
+  //initialise the SD card
   Serial.print("Initializing SD card...");
 
   if (!SD.begin(BUILTIN_SDCARD)) {
@@ -720,25 +753,24 @@ zPos = zPos + z[3][1];
   }
   Serial.println("initialization done.");
 
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
+  // open the position data file
   Pos = SD.open("Pos.txt", FILE_WRITE);
 
   // if the file opened okay, write to it:
   if (Pos) {
     Serial.print("Writing to Pos.txt...");
     
-    //yaw pitch and roll 
-  Pos.print("Xpos: ");
-  Pos.print(xPos);
-  Pos.print("\tYpos: ");
-  Pos.print(yPos);
-  Pos.print("\tZpos: ");
-  Pos.println(zPos);
+    //write to file
+    Pos.print("Xpos: ");
+    Pos.print(xPos);
+    Pos.print("\tYpos: ");
+    Pos.print(yPos);
+    Pos.print("\tZpos: ");
+    Pos.println(zPos);
 
     delay(10);
 
-    // close the file:
+    // close the file
     Pos.close();
     Serial.println("done.");
   } else {
@@ -747,12 +779,15 @@ zPos = zPos + z[3][1];
   }
 //-----------------------------------------------------------------------------------------------------------
   //calibration 
+  /* <serial print for troubleshooting>
   Serial.print("Cali: ");
   Serial.print(system);
   Serial.print(gyro);
   Serial.print(accel);
   Serial.println(mg);
+  */
 
+  //initialise the SD card
   Serial.print("Initializing SD card...");
 
   if (!SD.begin(BUILTIN_SDCARD)) {
@@ -761,15 +796,14 @@ zPos = zPos + z[3][1];
   }
   Serial.println("initialization done.");
 
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
+  // open the calibration data file
   Cali = SD.open("Cali.txt", FILE_WRITE);
 
   // if the file opened okay, write to it:
   if (Cali) {
     Serial.print("Writing to Cali.txt...");
     
-    //yaw pitch and roll 
+    //write to file
     Cali.print("Cali: ");
     Cali.print(system);
     Cali.print(gyro);
@@ -778,7 +812,7 @@ zPos = zPos + z[3][1];
 
     delay(10);
 
-    // close the file:
+    // close the file
     Cali.close();
     Serial.println("done.");
   } else {
@@ -789,18 +823,29 @@ zPos = zPos + z[3][1];
   
 //-----------------------------------------------------------------------------------------------------------
   //GPS
+  /* <serial print for troubleshooting>
+  Serial.print("Location: ");
+  Serial.print(GPS.latitude, 4);
+  Serial.print(", ");
+  Serial.print(GPS.longitude, 4);
+  Serial.print("\tAltitude: ");
+  Serial.print(GPS.altitude);
+  Serial.print("\tSatNum: ");
+  Serial.print((int)GPS.satellites);
+  */
+
+  //initialise the SD card
   if (!SD.begin(BUILTIN_SDCARD)) {
-    while (1);
+  while (1);
   }
 
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
+  // open the GPS file
   GPS1 = SD.open("GPS1.txt", FILE_WRITE);
 
   // if the file opened okay, write to it:
   if (GPS1) {
     
-    //GPS
+    //write to file
     GPS1.print("Location: ");
     GPS1.print(GPS.latitude, 4);
     GPS1.print(", ");
@@ -826,22 +871,26 @@ zPos = zPos + z[3][1];
     }
     GPS1.println(GPS.milliseconds);
 
-    //}
+
     delay(10);
-    // close the file:
+    
+    // close the file
     GPS1.close();
   } 
 
 
 //-----------------------------------------------------------------------------------------------------------
   //altimeter
+  /* <serial print for troubleshooting>
   Serial.print("Temp: ");
   Serial.print(bmp.readTemperature());
   Serial.print("\tPressure: ");
   Serial.print(bmp.readPressure());
   Serial.print("\tAltitude: ");
   Serial.println(bmp.readAltitude(1023.7));
+  */
 
+  //initialise the SD card
   Serial.print("Initializing SD card...");
 
   if (!SD.begin(BUILTIN_SDCARD)) {
@@ -850,14 +899,14 @@ zPos = zPos + z[3][1];
   }
   Serial.println("initialization done.");
 
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
+  // open the altimeter data file
   Alt = SD.open("Alt.txt", FILE_WRITE);
 
   // if the file opened okay, write to it:
   if (Alt) {
     Serial.print("Writing to Alt.txt...");
-    
+
+    //wrtie to file
     Alt.print("Temperature: ");
     Alt.print(bmp.readTemperature());
     Alt.print("\tPressure: ");
@@ -867,7 +916,7 @@ zPos = zPos + z[3][1];
     
     delay(10);
 
-    // close the file:
+    // close the file
     Alt.close();
     Serial.println("done.");
   } else {
@@ -887,11 +936,13 @@ zPos = zPos + z[3][1];
   Sensor.e = bmp.readTemperature();
   Sensor.f = bmp.readPressure();
   Sensor.g = bmp.readAltitude(1023.7); //LOCAL PRESSURE
-  
+
+  //write to the receiver
   radio.write(&Sensor, sizeof(Sensor));
 
-  bool ok = radio.write(&Sensor, sizeof(Sensor));
-  if (ok) {
+  //record if data has been sent
+  bool sent0 = radio.write(&Sensor, sizeof(Sensor));
+  if (sent0) {
     Serial.println("\tSent0");
   }
   else {
@@ -911,11 +962,12 @@ zPos = zPos + z[3][1];
   Sensor.f = GPS.altitude;
   Sensor.g = (int)GPS.satellites;
 
-
+  //write to the receiver
   radio.write(&Sensor, sizeof(Sensor));
 
-  bool written = radio.write(&Sensor, sizeof(Sensor));
-  if (written) {
+  //record if data has been sent
+  bool sent1 = radio.write(&Sensor, sizeof(Sensor));
+  if (sent1) {
     Serial.println("\tSent1");
   }
   else {
@@ -935,113 +987,15 @@ zPos = zPos + z[3][1];
   Sensor.f = 0;
   Sensor.g = 0;
 
-
+  //write to receiver
   radio.write(&Sensor, sizeof(Sensor));
 
-  bool yup = radio.write(&Sensor, sizeof(Sensor));
-  if (yup) {
+  //record if data has been sent
+  bool sent2 = radio.write(&Sensor, sizeof(Sensor));
+  if (sent2) {
     Serial.println("\tSent2");
   }
   else {
     Serial.println("\tFailed2");
     }
 }
-
-//-----------------------------------------------------------------------------------------------------------
-//tell the code when each transition is required
-
-  void state0() {
-  Serial.println("Safe State");
-  //LED1 on
-  digitalWrite(led1Pin, HIGH);
-  //SD connection test
-  if (!SD.begin(chipSelect)) {
-    Serial.println("Card failed, or not present");
-    return;
-  //camera connection test
-  if (cam.begin()) {
-    Serial.println("Camera Found:");
-  } else {
-    Serial.println("No camera found?");
-    return;
-  }
-}
-  }
-
-//-----------------------------------------------------------------------------------------------------------
-
-  void state1() {
-  Serial.println("Launch");
-  //zero everything (?)
-  //servo test
-  for (pos = 0; pos <= 180; pos += 1) { // goes from 0 degrees to 180 degrees
-    // in steps of 1 degree
-    myservo.write(pos);              // tell servo to go to position in variable 'pos'
-    delay(15);                       // waits 15ms for the servo to reach the position
-  }
-  for (pos = 180; pos >= 0; pos -= 1) { // goes from 180 degrees to 0 degrees
-    myservo.write(pos);              // tell servo to go to position in variable 'pos'
-    delay(15);                       // waits 15ms for the servo to reach the position
-  }
-  
-  //camera test
-  //takePhoto();
-
-  digitalWrite(led2Pin, HIGH); //LED2 on
-}
-
-
-//-----------------------------------------------------------------------------------------------------------
-
-  void state2() {
-  Serial.println("Ascending");
-  //LED2 on
-  digitalWrite(led3Pin, HIGH);
-}
-
-//-----------------------------------------------------------------------------------------------------------
-
-  void state3() {
-  Serial.println("Apogee");
-}
-
-//-----------------------------------------------------------------------------------------------------------
-
-  void state4() {
-  Serial.println("Parachute deploy");
-  //parachute detect confirmation
-}
-
-
-//-----------------------------------------------------------------------------------------------------------
-
-  void state5() {
-  Serial.print("Camera");
-  //servo open
-  for (pos = 0; pos <= 180; pos += 1) { // goes from 0 degrees to 180 degrees
-    // in steps of 1 degree
-    myservo.write(pos);              // tell servo to go to position in variable 'pos'
-    delay(15);                       // waits 15ms for the servo to reach the position
-  }
-  
-  //take photos
-  takePhoto();
-  //save pictures onto on board sd card
-}
-
-//-----------------------------------------------------------------------------------------------------------
-
-
-void state6() {
-  Serial.println("Landing mode");
-  //close servo
-  for (pos = 180; pos >= 0; pos -= 1) { // goes from 180 degrees to 0 degrees
-    myservo.write(pos);              // tell servo to go to position in variable 'pos'
-    delay(15);                       // waits 15ms for the servo to reach the position
-  }
-  //LED1 back on
-  digitalWrite(led1Pin, HIGH);
- }
-
-
-//-----------------------------------------------------------------------------------------------------------
